@@ -8,6 +8,7 @@
 
 import CloudKit
 import RealmSwift
+import Realm
 
 func executeOnMainQueue(_ closure: () -> ()) {
     if Thread.isMainThread {
@@ -449,7 +450,7 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
                     if shouldIgnore(key: property.name) {
                         continue
                     }
-                    if property.isArray || property.type == PropertyType.linkingObjects {
+                    if property.type == PropertyType.linkingObjects {
                         continue
                     }
                     
@@ -462,7 +463,7 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
                 
                 for property in object.objectSchema.properties {
                     
-                    if property.isArray || property.type == PropertyType.linkingObjects {
+                    if property.type == PropertyType.linkingObjects {
                         continue
                     }
                     
@@ -480,7 +481,7 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
                 
                 for property in object.objectSchema.properties {
                     
-                    if property.isArray || property.type == PropertyType.linkingObjects {
+                    if property.type == PropertyType.linkingObjects {
                         continue
                     }
                     
@@ -505,7 +506,7 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
                 if shouldIgnore(key: property.name) {
                     continue
                 }
-                if property.isArray || property.type == PropertyType.linkingObjects {
+                if property.type == PropertyType.linkingObjects {
                     continue
                 }
                 
@@ -528,6 +529,16 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
             let separatorRange = recordName.range(of: ".")!
             let objectIdentifier = recordName.substring(from: separatorRange.upperBound)
             savePendingRelationship(name: key, syncedEntity: syncedEntity, targetIdentifier: objectIdentifier, realm: realmProvider.persistenceRealm)
+            
+        } else if let referenceList = value as? [CKReference] {
+            let referenceType = object.objectSchema.className
+            let list = RLMArray<Object>(objectClassName: referenceType)
+            let objectIdentifiers = referenceList.map { reference -> String in
+                let recordName = reference.recordID.recordName
+                let separatorRange = recordName.range(of: ".")!
+                return recordName.substring(from: separatorRange.upperBound)
+            }
+            savePendingRelationship(name: key, syncedEntity: syncedEntity, targetIdentifiers: objectIdentifiers, realm: realmProvider.persistenceRealm)
         } else if let asset = value as? CKAsset {
             // Take data from asset url
             let data = NSData(contentsOf: asset.fileURL)
@@ -544,6 +555,17 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
         pendingRelationship.relationshipName = name
         pendingRelationship.forSyncedEntity = syncedEntity
         pendingRelationship.targetIdentifier = targetIdentifier
+        realm.add(pendingRelationship)
+    }
+    
+    func savePendingRelationship(name: String, syncedEntity: SyncedEntity, targetIdentifiers: [String], realm: Realm) {
+        
+        let pendingRelationship = PendingRelationship()
+        pendingRelationship.relationshipName = name
+        pendingRelationship.forSyncedEntity = syncedEntity
+        pendingRelationship.toMany = true
+        pendingRelationship.targetIdentifier = targetIdentifiers.joined(separator: "&&")
+        print(pendingRelationship)
         realm.add(pendingRelationship)
     }
     
@@ -594,8 +616,20 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
             }
             
             let targetObjectClass = realmObjectClass(name: className)
-            let targetObject = realmProvider.targetRealm.object(ofType: targetObjectClass, forPrimaryKey: relationship.targetIdentifier)
-            
+            let targetObject: Any?
+            if relationship.toMany {
+                targetObject = relationship
+                    .targetIdentifier
+                    .components(separatedBy: "&&")
+                    .compactMap { targetIdentifier -> Object? in
+                        realmProvider.targetRealm.object(ofType: targetObjectClass, forPrimaryKey: targetIdentifier)
+                    }
+            } else {
+                targetObject = realmProvider
+                    .targetRealm
+                    .object(ofType: targetObjectClass, forPrimaryKey: relationship.targetIdentifier)
+                
+            }
             guard let origin = originObject, let target = targetObject else {
                 continue
             }
@@ -732,6 +766,25 @@ public class RealmSwiftAdapter: NSObject, QSModelAdapter {
                     let action: CKReferenceAction = parentKey == property.name ? .deleteSelf : .none
                     let recordReference = CKReference(recordID: recordID, action: action)
                     record[property.name] = recordReference;
+                } else if let listBase = object?[property.name] as? ListBase {
+                    
+                    var referenceList = [CKReference]()
+                    for index in 0..<listBase._rlmArray.count {
+                        if let target = listBase._rlmArray[index] as? Object {
+                            let targetIdentifier = target.value(forKey: objectClass.primaryKey()!) as! String
+                            let referenceIdentifier = "\(property.objectClassName!).\(targetIdentifier)"
+                            let recordID = CKRecordID(recordName: referenceIdentifier, zoneID: zoneID)
+                            // if we set the parent we must make the action .deleteSelf, otherwise we get errors if we ever try to delete the parent record
+                            let action: CKReferenceAction = parentKey == property.name ? .deleteSelf : .none
+                            let recordReference = CKReference(recordID: recordID, action: action)
+                            referenceList.append(recordReference)
+                        }
+                    }
+                    
+                    if referenceList.count > 0 {
+                        record[property.name] = referenceList as CKRecordValue
+                    }
+                    
                 }
                 
             } else if !property.isArray &&

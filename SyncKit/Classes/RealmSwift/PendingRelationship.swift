@@ -13,4 +13,5 @@ class PendingRelationship: Object {
     @objc dynamic var relationshipName: String!
     @objc dynamic var targetIdentifier: String!
     @objc dynamic var forSyncedEntity: SyncedEntity!
+    @objc dynamic var toMany = false
 }
